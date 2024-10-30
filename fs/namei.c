@@ -40,6 +40,8 @@
 #include <linux/init_task.h>
 #include <linux/uaccess.h>
 
+#include <linux/crosslayer.h>
+
 #include "internal.h"
 #include "mount.h"
 

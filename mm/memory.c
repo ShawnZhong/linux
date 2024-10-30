@@ -4177,6 +4177,7 @@ static vm_fault_t do_read_fault(struct vm_fault *vmf)
 	unlock_page(vmf->page);
 	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
 		put_page(vmf->page);
+
 	return ret;
 }
 
@@ -4308,6 +4309,7 @@ static vm_fault_t do_fault(struct vm_fault *vmf)
 		pte_free(vm_mm, vmf->prealloc_pte);
 		vmf->prealloc_pte = NULL;
 	}
+
 	return ret;
 }
 

@@ -369,6 +369,11 @@
 445	common	landlock_add_rule	sys_landlock_add_rule
 446	common	landlock_restrict_self	sys_landlock_restrict_self
 447	common	memfd_secret		sys_memfd_secret
+448	common	start_cross_trace	sys_start_cross_trace	
+449  common    pread_ra            sys_pread_ra 
+450  common    read_ra             sys_read_ra 
+451  common    readahead_info      sys_readahead_info 
+452 common nusa_inode_rwsem_ctrl sys_nusa_inode_rwsem_ctrl
 
 #
 # Due to a historical design error, certain syscalls are numbered differently

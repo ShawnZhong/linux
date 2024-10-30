@@ -24,6 +24,7 @@
 #include <linux/shmem_fs.h>
 #include <linux/cleancache.h>
 #include <linux/rmap.h>
+#include <linux/cross_bitmap.h>
 #include "internal.h"
 
 /*
@@ -197,6 +198,10 @@ invalidate_complete_page(struct address_space *mapping, struct page *page)
 {
 	int ret;
 
+#ifdef CONFIG_CROSS_FILE_BITMAP
+        pgoff_t index = page->index;
+#endif
+
 	if (page->mapping != mapping)
 		return 0;
 
@@ -204,6 +209,12 @@ invalidate_complete_page(struct address_space *mapping, struct page *page)
 		return 0;
 
 	ret = remove_mapping(mapping, page);
+        
+#ifdef CONFIG_CROSS_FILE_BITMAP
+        if(ret){
+                remove_pg_cross_bitmap(mapping->host, index);
+        }
+#endif
 
 	return ret;
 }

@@ -33,6 +33,8 @@
 #include <linux/dnotify.h>
 #include <linux/compat.h>
 
+#include <linux/cross_bitmap.h>
+
 #include "internal.h"
 
 int do_truncate(struct user_namespace *mnt_userns, struct dentry *dentry,

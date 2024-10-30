@@ -23,6 +23,11 @@
 #include <trace/events/writeback.h>
 #include "internal.h"
 
+
+/* CROSSLAYER PREFETCHING CHANGE*/
+#ifdef CONFIG_CROSS_FILE_BITMAP
+#include <linux/cross_bitmap.h>
+#endif
 /*
  * Inode locking rules:
  *
@@ -161,6 +166,13 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_rdev = 0;
 	inode->dirtied_when = 0;
 
+#ifdef CONFIG_ENABLE_CROSS_STATS
+	/* Initialize the pfetch_state structure that maintains 
+	 * per inode prefetch information
+	 */
+        init_file_pfetch_state(&inode->pfetch_state);
+#endif
+
 #ifdef CONFIG_CGROUP_WRITEBACK
 	inode->i_wb_frn_winner = 0;
 	inode->i_wb_frn_avg_time = 0;
@@ -184,6 +196,7 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 		__set_bit(AS_THP_SUPPORT, &mapping->flags);
 	mapping->wb_err = 0;
 	atomic_set(&mapping->i_mmap_writable, 0);
+
 #ifdef CONFIG_READ_ONLY_THP_FOR_FS
 	atomic_set(&mapping->nr_thps, 0);
 #endif
@@ -247,6 +260,10 @@ static struct inode *alloc_inode(struct super_block *sb)
 		i_callback(&inode->i_rcu);
 		return NULL;
 	}
+
+#ifdef CONFIG_CROSS_FILE_BITMAP
+        init_inode_cross(inode);
+#endif
 
 	return inode;
 }
@@ -1673,9 +1690,17 @@ void iput(struct inode *inode)
 {
 	if (!inode)
 		return;
+
+#ifdef CONFIG_CROSS_FILE_BITMAP
+                if(inode->bitmap && atomic_read(&inode->i_count) <= 2){
+			free_cross_bitmap(inode);
+                }
+#endif
+
 	BUG_ON(inode->i_state & I_CLEAR);
 retry:
 	if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock)) {
+
 		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {
 			atomic_inc(&inode->i_count);
 			spin_unlock(&inode->i_lock);

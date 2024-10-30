@@ -47,7 +47,8 @@ static void propagate_protected_usage(struct page_counter *c,
  * @counter: counter
  * @nr_pages: number of pages to cancel
  */
-void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages)
+void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages, 
+        bool is_cache)
 {
 	long new;
 
@@ -59,6 +60,15 @@ void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages)
 		atomic_long_set(&counter->usage, new);
 	}
 	propagate_protected_usage(counter, new);
+
+     if(is_cache){
+	     new = atomic_long_sub_return(nr_pages, &counter->cache_usage);
+	     if (WARN_ONCE(new < 0, "page_cache_counter underflow: %ld nr_pages=%lu\n",
+		          new, nr_pages)) {
+		new = 0;
+		atomic_long_set(&counter->cache_usage, new);
+	     }
+     }
 }
 
 /**
@@ -97,12 +107,13 @@ void page_counter_charge(struct page_counter *counter, unsigned long nr_pages)
  */
 bool page_counter_try_charge(struct page_counter *counter,
 			     unsigned long nr_pages,
-			     struct page_counter **fail)
+			     struct page_counter **fail, bool is_cache)
 {
 	struct page_counter *c;
 
 	for (c = counter; c; c = c->parent) {
 		long new;
+		long new_cache;
 		/*
 		 * Charge speculatively to avoid an expensive CAS.  If
 		 * a bigger charge fails, it might falsely lock out a
@@ -130,6 +141,17 @@ bool page_counter_try_charge(struct page_counter *counter,
 			*fail = c;
 			goto failed;
 		}
+
+          /*try charging cache page*/
+          if(is_cache){
+               new_cache = atomic_long_add_return(nr_pages, &c->cache_usage);
+               if(new_cache > c->cache_max){
+                   atomic_long_sub(nr_pages, &c->cache_usage);
+
+			    *fail = c;
+                   goto failed;
+               }
+          }
 		propagate_protected_usage(c, new);
 		/*
 		 * Just like with failcnt, we can live with some
@@ -142,7 +164,7 @@ bool page_counter_try_charge(struct page_counter *counter,
 
 failed:
 	for (c = counter; c != *fail; c = c->parent)
-		page_counter_cancel(c, nr_pages);
+		page_counter_cancel(c, nr_pages, is_cache);
 
 	return false;
 }
@@ -151,13 +173,15 @@ failed:
  * page_counter_uncharge - hierarchically uncharge pages
  * @counter: counter
  * @nr_pages: number of pages to uncharge
+ * @is_cache: are these cache pages ?
  */
-void page_counter_uncharge(struct page_counter *counter, unsigned long nr_pages)
+void page_counter_uncharge(struct page_counter *counter, unsigned long nr_pages, 
+        bool is_cache)
 {
 	struct page_counter *c;
 
 	for (c = counter; c; c = c->parent)
-		page_counter_cancel(c, nr_pages);
+		page_counter_cancel(c, nr_pages, is_cache);
 }
 
 /**
@@ -198,6 +222,49 @@ int page_counter_set_max(struct page_counter *counter, unsigned long nr_pages)
 			return 0;
 
 		counter->max = old;
+		cond_resched();
+	}
+}
+
+
+/**
+ * page_counter_set_cache_max - set the maximum number of pages allowed
+ * @counter: counter
+ * @nr_pages: limit to set
+ *
+ * Returns 0 on success, -EBUSY if the current number of pages on the
+ * counter already exceeds the specified limit.
+ *
+ * The caller must serialize invocations on the same counter.
+ */
+int page_counter_set_cache_max(struct page_counter *counter, unsigned long nr_pages)
+{
+	for (;;) {
+		unsigned long old;
+		long usage;
+
+		/*
+		 * Update the limit while making sure that it's not
+		 * below the concurrently-changing counter value.
+		 *
+		 * The xchg implies two full memory barriers before
+		 * and after, so the read-swap-read is ordered and
+		 * ensures coherency with page_counter_try_charge():
+		 * that function modifies the count before checking
+		 * the limit, so if it sees the old limit, we see the
+		 * modified counter and retry.
+		 */
+		usage = page_cache_counter_read(counter);
+
+		if (usage > nr_pages)
+			return -EBUSY;
+
+		old = xchg(&counter->cache_max, nr_pages);
+
+		if (page_cache_counter_read(counter) <= usage)
+			return 0;
+
+		counter->cache_max = old;
 		cond_resched();
 	}
 }

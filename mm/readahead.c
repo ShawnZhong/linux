@@ -23,6 +23,10 @@
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
 #include <linux/sched/mm.h>
+#include <linux/crosslayer.h>
+#include <linux/vmstat.h>
+#include <linux/cross_bitmap.h>
+#include <linux/jiffies.h>
 
 #include "internal.h"
 
@@ -174,6 +178,7 @@ out:
 void page_cache_ra_unbounded(struct readahead_control *ractl,
 		unsigned long nr_to_read, unsigned long lookahead_size)
 {
+
 	struct address_space *mapping = ractl->mapping;
 	unsigned long index = readahead_index(ractl);
 	LIST_HEAD(page_pool);
@@ -213,8 +218,9 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 		}
 
 		page = __page_cache_alloc(gfp_mask);
-		if (!page)
+		if (!page){
 			break;
+                }
 		if (mapping->a_ops->readpages) {
 			page->index = index + i;
 			list_add(&page->lru, &page_pool);
@@ -225,10 +231,31 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			i = ractl->_index + ractl->_nr_pages - index - 1;
 			continue;
 		}
+                //only happens if lookahead_size > 0
 		if (i == nr_to_read - lookahead_size)
 			SetPageReadahead(page);
+
 		ractl->_nr_pages++;
+
+#if 0
+#ifdef CONFIG_CROSS_FILE_BITMAP
+                add_pg_cross_bitmap(mapping->host, index+i);
+#endif
+#endif
+
+                /*update read_req from user*/
+                if(ractl->ra_req)
+                        ractl->ra_req->bio_req_nr += 1;
 	}
+
+#ifdef CONFIG_CROSS_FILE_BITMAP
+        /*
+         * If LRU is unable to accept pages - that is a much bigger problem
+         * since this is unbounded, read for all pages will happen
+         */
+                add_pg_cross_bitmap(mapping->host, index, i+1);
+#endif
+
 
 	/*
 	 * Now start the IO.  We ignore I/O errors - if the page is not
@@ -264,6 +291,15 @@ void do_page_cache_ra(struct readahead_control *ractl,
 	if (nr_to_read > end_index - index)
 		nr_to_read = end_index - index + 1;
 
+#ifdef CONFIG_ENABLE_CROSSLAYER_DEBUG
+     if(ractl->pfetch_state.is_app_readahead){
+         if(nr_to_read != ractl->pfetch_state.ra_orig_nr_pages)
+            printk("%s: readahead req_pages:%lu, %s : %lu\n", 
+                 current->comm, ractl->pfetch_state.ra_orig_nr_pages, 
+                 __func__, nr_to_read);
+     }
+#endif
+
 	page_cache_ra_unbounded(ractl, nr_to_read, lookahead_size);
 }
 
@@ -283,13 +319,25 @@ void force_page_cache_ra(struct readahead_control *ractl,
 			!mapping->a_ops->readahead))
 		return;
 
-	/*
-	 * If the request exceeds the readahead window, allow the read to
-	 * be up to the optimal hardware IO size
-	 */
 	index = readahead_index(ractl);
-	max_pages = max_t(unsigned long, bdi->io_pages, ra->ra_pages);
-	nr_to_read = min_t(unsigned long, nr_to_read, max_pages);
+
+        if(!enable_unbounded){
+	        /*
+	        * If the request exceeds the readahead window, allow the read to
+	        * be up to the optimal hardware IO size
+	        */
+	        max_pages = max_t(unsigned long, bdi->io_pages, ra->ra_pages);
+	        nr_to_read = min_t(unsigned long, nr_to_read, max_pages);
+        }
+
+    //If disable_2mb_limit == true, we will do all of the request together
+    //else we do the typical 2 MB chunks
+    if(disable_2mb_limit){
+        //printk("%s: disable_2mb_limit == True\n", __func__);
+        do_page_cache_ra(ractl, nr_to_read, 0);
+    }
+    else{
+        //printk("%s: disable_2mb_limit == False\n", __func__);
 	while (nr_to_read) {
 		unsigned long this_chunk = (2 * 1024 * 1024) / PAGE_SIZE;
 
@@ -301,6 +349,7 @@ void force_page_cache_ra(struct readahead_control *ractl,
 		index += this_chunk;
 		nr_to_read -= this_chunk;
 	}
+    }
 }
 
 /*
@@ -443,6 +492,7 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	unsigned long index = readahead_index(ractl);
 	pgoff_t prev_index;
 
+
 	/*
 	 * If the request exceeds the readahead window, allow the read to
 	 * be up to the optimal hardware IO size
@@ -525,7 +575,13 @@ static void ondemand_readahead(struct readahead_control *ractl,
 
 initial_readahead:
 	ra->start = index;
-	ra->size = get_init_ra_size(req_size, max_pages);
+
+        if(enable_unbounded){ //UNBOUNDED_READ
+	        ra->size = req_size;
+        }else{
+	        ra->size = get_init_ra_size(req_size, max_pages);
+        }
+
 	ra->async_size = ra->size > req_size ? ra->size - req_size : ra->size;
 
 readit:
@@ -541,7 +597,12 @@ readit:
 			ra->async_size = add_pages;
 			ra->size += add_pages;
 		} else {
-			ra->size = max_pages;
+                        if(enable_unbounded){ //UNBOUNDED_READ
+			        ra->size = req_size;
+                        }else{
+			        ra->size = max_pages;
+                        }
+               
 			ra->async_size = max_pages >> 1;
 		}
 	}
@@ -571,13 +632,14 @@ void page_cache_sync_ra(struct readahead_control *ractl,
 	/* be dumb */
 	if (do_forced_ra) {
 		force_page_cache_ra(ractl, req_count);
-		return;
+          return;
 	}
 
 	/* do read-ahead */
 	ondemand_readahead(ractl, false, req_count);
 }
 EXPORT_SYMBOL_GPL(page_cache_sync_ra);
+
 
 void page_cache_async_ra(struct readahead_control *ractl,
 		struct page *page, unsigned long req_count)
@@ -603,10 +665,12 @@ void page_cache_async_ra(struct readahead_control *ractl,
 	if (blk_cgroup_congested())
 		return;
 
+
 	/* do read-ahead */
 	ondemand_readahead(ractl, true, req_count);
 }
 EXPORT_SYMBOL_GPL(page_cache_async_ra);
+
 
 ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
 {
@@ -636,7 +700,158 @@ out:
 
 SYSCALL_DEFINE3(readahead, int, fd, loff_t, offset, size_t, count)
 {
+        //printk("%s: pid=%d, fd=%d\n", __func__, current->pid, fd);
 	return ksys_readahead(fd, offset, count);
+}
+
+
+//syscall 451
+SYSCALL_DEFINE4(readahead_info, int, fd, loff_t, offset, size_t, count,
+                struct read_ra_req __user *, ra_user)
+{
+        long ret = -1;
+        struct read_ra_req ra;
+        struct inode *inode;
+        bool first_time;
+        struct fd this_fd;
+
+        unsigned long start, end;
+
+        /*
+         * Sets to true if no bitmap is allocated for
+         * this inode and readahead_info(fd, 0, 0, ra_user);
+         * is called
+         */
+        first_time = false;
+
+
+
+        start = jiffies;
+        if (unlikely(copy_from_user(&ra, ra_user, sizeof(struct read_ra_req)))){
+	        printk("%s: unable to copy from user, doing vanilla readahead\n", __func__);
+                goto normal_readahead;
+        }
+        end = jiffies;
+        /*
+	printk("\n %s: fd=%d, offset=%lld, count=%ld c_f_u in %ld millisec\n",
+			__func__, fd, offset, count, (((end-start)*1000)/HZ));
+        */
+
+        /*
+         * Return the file bitmap
+         */
+#ifdef CONFIG_CROSS_FILE_BITMAP
+
+        this_fd = fdget(fd);
+
+        if(likely(this_fd.file))
+                inode = file_inode(this_fd.file);
+        else{
+                //printk("%s: unable to find struct file for this fd\n", __func__);
+                /*
+                 * This means unable to find struct file for this fd
+                 */
+                ret = -10;
+                goto exit;
+        }
+
+        if(unlikely(!inode)){
+	        printk("%s: no inode!\n", __func__);
+                goto normal_readahead;
+        }
+
+        /*
+         * allocate bitmap if not already done
+         *
+         * if there is intention to readahead_info on a file
+         * alloc_cross_bitmap should be called first.
+         *
+         * can do that in the following fashion.
+         * at open, call readahead_info(fd, 0, 0, ra_user);
+         * This way no RA is done but atleast cross bitmap is created
+         */
+        if(!inode->bitmap){
+                //printk("%s: curr=%d, inode=%ld no bitmap\n", __func__, current->pid, inode->i_ino);
+                unsigned long end_index = ((i_size_read(inode) - 1) >> PAGE_SHIFT);
+                alloc_cross_bitmap(inode, end_index);
+
+                /*
+                 * Makes sure that the bitmap is copied only
+                 * if count > 0. It is possible that the
+                 * user sends a 0 count RA_info without allocating
+                 * bitmaps in the userspace.
+                 */
+                if(!count)
+                        first_time = true;
+        }
+        //ra.nr_relevant_bits = inode->nr_longs_used;
+        ra.nr_relevant_ulongs = inode->nr_longs_used;
+
+#endif
+
+        /*
+         *  with count == 0, ksys_readahead will
+         *  fetch the whole file in memory.
+         *  That is incorrect behaviour.
+         */
+        if(count > 0)
+	        ret = ksys_readahead(fd, offset, count);
+
+
+        /*
+         * Get the number of free pages in the system right now
+         */
+        ra.nr_free = global_zone_page_state(NR_FREE_PAGES);
+
+#ifdef CONFIG_CROSS_FILE_BITMAP
+        if(ra.data && inode->bitmap && !first_time){
+                unsigned long *to = ra.data;
+                unsigned long *from = inode->bitmap;
+
+                unsigned long start_ul = 0;
+                unsigned long size_ul = 0;
+
+                //Calculate the start and end 
+                unsigned long start_pg = offset >> PAGE_SHIFT;
+                unsigned long nr_pg = count >> PAGE_SHIFT;
+
+                start_ul = start_pg >> 6; //dividing by 64 (2^6 = 64)
+                size_ul = (nr_pg >> 6) + 1;
+
+                /*
+		printk_once("%s: order_ul=%d\n", __func__,
+				get_count_order_long(sizeof(unsigned long)*8));
+                */
+
+                down_read(&inode->bitmap_rw_sem);
+
+                if (unlikely(copy_to_user(to+start_ul, from+start_ul, 
+                                sizeof(unsigned long)*size_ul)))
+                {
+                        ret = -1;
+                        up_read(&inode->bitmap_rw_sem);
+                        printk("%s: couldnt copy data back to user\n", __func__);
+                }
+
+                up_read(&inode->bitmap_rw_sem);
+        }
+
+#endif
+
+        if (unlikely(copy_to_user(ra_user, &ra, sizeof(struct read_ra_req)))){
+                ret = -3;
+		printk("%s: couldnt copy struct read_ra_req back to user\n",
+				__func__);
+        }
+        goto exit;
+
+normal_readahead:
+	ret = ksys_readahead(fd, offset, count);
+
+exit:
+	fdput(this_fd);
+        return ret;
+
 }
 
 /**

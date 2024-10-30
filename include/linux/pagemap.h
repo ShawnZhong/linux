@@ -16,6 +16,8 @@
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
 
+#include <linux/crosslayer.h>
+
 struct pagevec;
 
 static inline bool mapping_empty(struct address_space *mapping)
@@ -705,6 +707,7 @@ void wait_for_stable_page(struct page *page);
 void __set_page_dirty(struct page *, struct address_space *, int warn);
 int __set_page_dirty_nobuffers(struct page *page);
 int __set_page_dirty_no_writeback(struct page *page);
+void account_page_dirtied(struct page *page, struct address_space *mapping);
 
 void page_endio(struct page *page, bool is_write, int err);
 
@@ -842,7 +845,11 @@ struct readahead_control {
 	pgoff_t _index;
 	unsigned int _nr_pages;
 	unsigned int _batch_count;
+        struct file_pfetch_state pfetch_state; /*Ractl level pfetch stats*/
+        struct read_ra_req *ra_req;    //user req struct
 };
+
+#ifdef CONFIG_ENABLE_CROSS_STATS
 
 #define DEFINE_READAHEAD(ractl, f, r, m, i)				\
 	struct readahead_control ractl = {				\
@@ -850,7 +857,19 @@ struct readahead_control {
 		.mapping = m,						\
 		.ra = r,						\
 		._index = i,						\
-	}
+	};                                         \
+     init_file_pfetch_state(&ractl.pfetch_state)
+
+#else
+
+#define DEFINE_READAHEAD(ractl, f, r, m, i)				\
+	struct readahead_control ractl = {				\
+		.file = f,						\
+		.mapping = m,						\
+		.ra = r,						\
+		._index = i,						\
+	};
+#endif
 
 #define VM_READAHEAD_PAGES	(SZ_128K / PAGE_SIZE)
 
@@ -884,6 +903,24 @@ void page_cache_sync_readahead(struct address_space *mapping,
 	page_cache_sync_ra(&ractl, req_count);
 }
 
+
+/**
+ * page_cache_sync_readahead_req - accomodate ra_req
+ * from the user
+ */
+static inline
+void page_cache_sync_readahead_req(struct address_space *mapping,
+		struct file_ra_state *ra, struct file *file, pgoff_t index,
+		unsigned long req_count, struct read_ra_req *ra_req)
+{
+	DEFINE_READAHEAD(ractl, file, ra, mapping, index);
+     if(ra_req){
+        ractl.ra_req = ra_req;    //user req struct
+     }
+	page_cache_sync_ra(&ractl, req_count);
+}
+
+
 /**
  * page_cache_async_readahead - file readahead for marked pages
  * @mapping: address_space which holds the pagecache and I/O vectors
@@ -904,6 +941,24 @@ void page_cache_async_readahead(struct address_space *mapping,
 		struct page *page, pgoff_t index, unsigned long req_count)
 {
 	DEFINE_READAHEAD(ractl, file, ra, mapping, index);
+	page_cache_async_ra(&ractl, page, req_count);
+}
+
+
+/**
+ * page_cache_async_readahead_req - accomodate ra_req
+ * from the user
+ */
+static inline
+void page_cache_async_readahead_req(struct address_space *mapping,
+		struct file_ra_state *ra, struct file *file,
+		struct page *page, pgoff_t index, unsigned long req_count,
+          struct read_ra_req *ra_req)
+{
+	DEFINE_READAHEAD(ractl, file, ra, mapping, index);
+     if(ra_req){
+         ractl.ra_req = ra_req;
+     }
 	page_cache_async_ra(&ractl, page, req_count);
 }
 

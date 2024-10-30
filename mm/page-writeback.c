@@ -2421,7 +2421,7 @@ EXPORT_SYMBOL(__set_page_dirty_no_writeback);
  *
  * NOTE: This relies on being atomic wrt interrupts.
  */
-static void account_page_dirtied(struct page *page,
+void account_page_dirtied(struct page *page,
 		struct address_space *mapping)
 {
 	struct inode *inode = mapping->host;
@@ -2446,6 +2446,7 @@ static void account_page_dirtied(struct page *page,
 		mem_cgroup_track_foreign_dirty(page, wb);
 	}
 }
+EXPORT_SYMBOL(account_page_dirtied);
 
 /*
  * Helper function for deaccounting dirty page without writeback.

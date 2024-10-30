@@ -373,3 +373,9 @@ config IO_WQ
 	bool
 
 endmenu
+
+config NUSA_CONTROL
+    bool
+    default y
+    help
+      Allow user-space rwlock control 

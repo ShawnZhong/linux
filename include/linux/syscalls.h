@@ -1052,6 +1052,16 @@ asmlinkage long sys_landlock_add_rule(int ruleset_fd, enum landlock_rule_type ru
 asmlinkage long sys_landlock_restrict_self(int ruleset_fd, __u32 flags);
 asmlinkage long sys_memfd_secret(unsigned int flags);
 
+asmlinkage long sys_start_cross_trace(int flags, int val);
+asmlinkage ssize_t sys_pread_ra(unsigned int fd, char __user * buf,
+			size_t count, loff_t pos, struct read_ra_req __user * ra);
+asmlinkage ssize_t sys_read_ra(unsigned int fd, char __user * buf,
+			size_t count, size_t ra_count);
+asmlinkage long sys_readahead_info(int fd, loff_t offset,
+			size_t count, struct read_ra_req __user * ra);
+
+asmlinkage long sys_nusa_inode_rwsem_ctrl(int flag);
+
 /*
  * Architecture-specific system calls
  */
@@ -1373,6 +1383,7 @@ long ksys_old_shmctl(int shmid, int cmd, struct shmid_ds __user *buf);
 long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
 			    unsigned int nsops,
 			    const struct old_timespec32 __user *timeout);
+
 
 int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
 		int __user *optlen);

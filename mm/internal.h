@@ -13,6 +13,16 @@
 #include <linux/tracepoint-defs.h>
 
 /*
+ * from mm/crosslayer.c
+ * used for enabling/disabling unbounded reads/readahead
+ * and disabling 2MB limit in force_page_cache_ra
+ * and setting value of cross_bitmap_shift
+ */
+extern int enable_unbounded;
+extern int disable_2mb_limit;
+extern int cross_bitmap_shift;
+
+/*
  * The set of flags that only affect watermark checking and reclaim
  * behaviour. This is used by the MM to obey the caller constraints
  * about IO, FS and watermark checking while ignoring placement
@@ -52,11 +62,14 @@ void unmap_page_range(struct mmu_gather *tlb,
 void do_page_cache_ra(struct readahead_control *, unsigned long nr_to_read,
 		unsigned long lookahead_size);
 void force_page_cache_ra(struct readahead_control *, unsigned long nr);
+
+
 static inline void force_page_cache_readahead(struct address_space *mapping,
 		struct file *file, pgoff_t index, unsigned long nr_to_read)
 {
-	DEFINE_READAHEAD(ractl, file, &file->f_ra, mapping, index);
-	force_page_cache_ra(&ractl, nr_to_read);
+     DEFINE_READAHEAD(ractl, file, &file->f_ra, mapping, index);
+
+     force_page_cache_ra(&ractl, nr_to_read);
 }
 
 unsigned find_lock_entries(struct address_space *mapping, pgoff_t start,

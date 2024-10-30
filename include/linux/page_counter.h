@@ -13,6 +13,10 @@ struct page_counter {
 	unsigned long high;
 	unsigned long max;
 
+     /*Cache memory*/
+     atomic_long_t cache_usage;
+     unsigned long cache_max;
+
 	/* effective memory.min and memory.min usage tracking */
 	unsigned long emin;
 	atomic_long_t min_usage;
@@ -46,7 +50,9 @@ static inline void page_counter_init(struct page_counter *counter,
 				     struct page_counter *parent)
 {
 	atomic_long_set(&counter->usage, 0);
+	atomic_long_set(&counter->cache_usage, 0);
 	counter->max = PAGE_COUNTER_MAX;
+	counter->cache_max = PAGE_COUNTER_MAX;
 	counter->parent = parent;
 }
 
@@ -55,12 +61,19 @@ static inline unsigned long page_counter_read(struct page_counter *counter)
 	return atomic_long_read(&counter->usage);
 }
 
-void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages);
-void page_counter_charge(struct page_counter *counter, unsigned long nr_pages);
+static inline unsigned long page_cache_counter_read(struct page_counter *counter)
+{
+	return atomic_long_read(&counter->cache_usage);
+}
+
+void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages, 
+        bool is_cache);
+void page_counter_charge(struct page_counter *counter, unsigned long nr_pages); 
 bool page_counter_try_charge(struct page_counter *counter,
 			     unsigned long nr_pages,
-			     struct page_counter **fail);
-void page_counter_uncharge(struct page_counter *counter, unsigned long nr_pages);
+			     struct page_counter **fail, bool is_cache);
+void page_counter_uncharge(struct page_counter *counter, unsigned long nr_pages, 
+        bool is_cache);
 void page_counter_set_min(struct page_counter *counter, unsigned long nr_pages);
 void page_counter_set_low(struct page_counter *counter, unsigned long nr_pages);
 
@@ -71,6 +84,7 @@ static inline void page_counter_set_high(struct page_counter *counter,
 }
 
 int page_counter_set_max(struct page_counter *counter, unsigned long nr_pages);
+int page_counter_set_cache_max(struct page_counter *counter, unsigned long nr_pages);
 int page_counter_memparse(const char *buf, const char *max,
 			  unsigned long *nr_pages);
 

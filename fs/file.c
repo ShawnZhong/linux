@@ -22,6 +22,8 @@
 #include <linux/close_range.h>
 #include <net/sock.h>
 
+#include <linux/crosslayer.h>
+
 #include "internal.h"
 
 unsigned int sysctl_nr_open __read_mostly = 1024*1024;
@@ -624,6 +626,9 @@ int close_fd(unsigned fd)
 	file = pick_file(files, fd);
 	if (!file)
 		return -EBADF;
+#ifdef CONFIG_ENABLE_CROSS_STATS 
+    	print_inode_stats(file->f_inode);
+#endif
 
 	return filp_close(file, files);
 }
@@ -1239,3 +1244,16 @@ int iterate_fd(struct files_struct *files, unsigned n,
 	return res;
 }
 EXPORT_SYMBOL(iterate_fd);
+
+SYSCALL_DEFINE1(nusa_inode_rwsem_ctrl, int, flag)
+{
+        if (flag == 0) {
+                /* re-enable inode rw_sem */
+                current->inode_rwsem_ctrl = 0;
+        } else {
+                /* disable inode rw_sem */
+                current->inode_rwsem_ctrl = INODE_RWSEM_OFF;
+        }
+
+        return current->inode_rwsem_ctrl;
+}

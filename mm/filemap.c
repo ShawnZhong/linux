@@ -42,6 +42,8 @@
 #include <linux/psi.h>
 #include <linux/ramfs.h>
 #include <linux/page_idle.h>
+#include <linux/crosslayer.h>
+#include <linux/cross_bitmap.h>
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 #include "internal.h"
@@ -244,6 +246,9 @@ static void page_cache_free_page(struct address_space *mapping,
 		VM_BUG_ON_PAGE(page_count(page) <= 0, page);
 	} else {
 		put_page(page);
+#ifdef CONFIG_CACHE_LIMITING
+          cache_usage_reduce(1UL);
+#endif
 	}
 }
 
@@ -342,6 +347,13 @@ void delete_from_page_cache_batch(struct address_space *mapping,
 
 	xa_lock_irqsave(&mapping->i_pages, flags);
 	for (i = 0; i < pagevec_count(pvec); i++) {
+
+#ifdef CONFIG_CROSS_FILE_BITMAP
+                //printk("%s: page index truncated = %ld, app=%s\n", __func__, pvec->pages[i]->index, current->comm);
+                remove_pg_cross_bitmap(mapping->host, pvec->pages[i]->index);
+#endif
+
+
 		trace_mm_filemap_delete_from_page_cache(pvec->pages[i]);
 
 		unaccount_page_cache_page(mapping, pvec->pages[i]);
@@ -981,6 +993,10 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 		if (!(gfp_mask & __GFP_WRITE) && shadow)
 			workingset_refault(page, shadow);
 		lru_cache_add(page);
+
+#ifdef CONFIG_CACHE_LIMITING
+          cache_usage_increase(1UL);
+#endif
 	}
 	return ret;
 }
@@ -1034,6 +1050,10 @@ void __init pagecache_init(void)
 		init_waitqueue_head(&page_wait_table[i]);
 
 	page_writeback_init();
+
+#ifdef CONFIG_CACHE_LIMITING
+     cache_limit_reset();
+#endif
 }
 
 /*
@@ -1909,6 +1929,13 @@ no_page:
 			unlock_page(page);
 	}
 
+#if 0
+#ifdef CONFIG_CROSS_FILE_BITMAP
+	if(mapping && mapping->host)
+	        add_pg_cross_bitmap(mapping->host, index, 1);
+#endif
+#endif
+
 	return page;
 }
 EXPORT_SYMBOL(pagecache_get_page);
@@ -2266,6 +2293,111 @@ static void shrink_readahead_size_eio(struct file_ra_state *ra)
 	ra->ra_pages /= 4;
 }
 
+
+/*
+ * Walks the page cache and returns number of populated pages
+ */
+unsigned long filemap_walk_pagecache(int fd){
+    //Get address_space mapping from fd
+    //get size of file
+
+    unsigned long nr_populated = 0;
+    struct fd f = fdget(fd);
+    struct file *filep = f.file;
+    if(!filep)
+        return 0UL;
+
+    loff_t size = i_size_read(file_inode(filep));
+
+    struct address_space *mapping = filep->f_mapping;
+    if(!mapping)
+        return 0UL;
+
+	XA_STATE(xas, &mapping->i_pages, 0UL);
+	struct page *head;
+
+	rcu_read_lock();
+	for (head = xas_load(&xas); head; head = xas_next(&xas)) {
+		if (xas_retry(&xas, head)) // Need to retry
+			continue;
+
+		if (xas.xa_index > size) //Done all req pages
+              goto ret;
+
+          if(xa_is_value(head)){
+             goto ret;
+          }
+
+		if (!PageUptodate(head)){
+              goto next_page;
+          }
+		if (PageReadahead(head)){
+              goto next_page;
+          }
+
+          nr_populated += 1;
+
+next_page:
+
+		xas.xa_index = head->index + thp_nr_pages(head) - 1;
+		xas.xa_offset = (xas.xa_index >> xas.xa_shift) & XA_CHUNK_MASK;
+	}
+
+ret:
+	rcu_read_unlock();
+
+     return nr_populated;
+
+}
+
+
+/*
+ * Check the page cache for pages; prints missed blocks
+ */
+unsigned long filemap_check_pagecache(struct address_space *mapping, pgoff_t index, 
+        pgoff_t max)
+{
+	XA_STATE(xas, &mapping->i_pages, index);
+	struct page *head;
+
+     unsigned long nr_misses = 0;
+
+     //unsigned long inode_nr = filp->f_inode->i_ino;
+     //printk("inode_nr=%ld: start = %ld, end = %ld", inode_nr, index, max);
+
+	rcu_read_lock();
+	for (head = xas_load(&xas); head; head = xas_next(&xas)) {
+		if (xas_retry(&xas, head)) // Need to retry
+			continue;
+
+		if (xas.xa_index > max) //Done all req pages
+              goto ret;
+
+          if(xa_is_value(head)){
+             //printk("%ld,%ld,nopage\n", inode_nr, xas.xa_index);
+             nr_misses += 1;
+             goto ret;
+          }
+
+		if (!PageUptodate(head)){
+             //printk("%ld,%ld,not updated\n", inode_nr, xas.xa_index);
+             nr_misses += 1;
+          }
+		if (PageReadahead(head)){
+             //printk("%ld,%ld,readahead\n", inode_nr, xas.xa_index);
+             nr_misses += 1;
+          }
+
+		xas.xa_index = head->index + thp_nr_pages(head) - 1;
+		xas.xa_offset = (xas.xa_index >> xas.xa_shift) & XA_CHUNK_MASK;
+	}
+
+ret:
+	rcu_read_unlock();
+     return nr_misses;
+}
+
+
 /*
  * filemap_get_read_batch - Get a batch of pages for read
  *
@@ -2274,9 +2406,11 @@ static void shrink_readahead_size_eio(struct file_ra_state *ra)
  * middle of a THP, the entire THP will be returned.  The last page in
  * the batch may have Readahead set or be not Uptodate so that the
  * caller can take the appropriate action.
+ * This returns the nr of pages already in PG Cache
  */
-static void filemap_get_read_batch(struct address_space *mapping,
-		pgoff_t index, pgoff_t max, struct pagevec *pvec)
+//static void filemap_get_read_batch(struct address_space *mapping,
+struct page* filemap_get_read_batch(struct address_space *mapping,
+		pgoff_t index, pgoff_t max, struct pagevec *pvec, bool do_ra)
 {
 	XA_STATE(xas, &mapping->i_pages, index);
 	struct page *head;
@@ -2286,7 +2420,8 @@ static void filemap_get_read_batch(struct address_space *mapping,
 		if (xas_retry(&xas, head))
 			continue;
 		if (xas.xa_index > max || xa_is_value(head))
-			break;
+                        goto ret_null;
+			//break;
 		if (!page_cache_get_speculative(head))
 			goto retry;
 
@@ -2294,12 +2429,23 @@ static void filemap_get_read_batch(struct address_space *mapping,
 		if (unlikely(head != xas_reload(&xas)))
 			goto put_page;
 
-		if (!pagevec_add(pvec, head))
+		if (!pagevec_add(pvec, head) && !do_ra)
+          {
+              //printk("unable to add to pagevec\n");
 			break;
+          }
 		if (!PageUptodate(head))
-			break;
+          {
+              //printk("not uptodate \n");
+               goto ret_head;
+			//break;
+          }
 		if (PageReadahead(head))
-			break;
+            {
+             // printk("PageReadaheads \n");
+               goto ret_head;
+            }
+			//break;
 		xas.xa_index = head->index + thp_nr_pages(head) - 1;
 		xas.xa_offset = (xas.xa_index >> xas.xa_shift) & XA_CHUNK_MASK;
 		continue;
@@ -2308,7 +2454,14 @@ put_page:
 retry:
 		xas_reset(&xas);
 	}
+
+ret_null:
 	rcu_read_unlock();
+     return NULL;
+
+ret_head:
+	rcu_read_unlock();
+     return head;
 }
 
 static int filemap_read_page(struct file *file, struct address_space *mapping,
@@ -2435,17 +2588,17 @@ error:
 
 static int filemap_readahead(struct kiocb *iocb, struct file *file,
 		struct address_space *mapping, struct page *page,
-		pgoff_t last_index)
+		pgoff_t last_index, struct read_ra_req *ra_req)
 {
 	if (iocb->ki_flags & IOCB_NOIO)
 		return -EAGAIN;
-	page_cache_async_readahead(mapping, &file->f_ra, file, page,
-			page->index, last_index - page->index);
+	page_cache_async_readahead_req(mapping, &file->f_ra, file, page,
+			page->index, last_index - page->index, ra_req);
 	return 0;
 }
 
 static int filemap_get_pages(struct kiocb *iocb, struct iov_iter *iter,
-		struct pagevec *pvec)
+		struct pagevec *pvec, bool read_stats)
 {
 	struct file *filp = iocb->ki_filp;
 	struct address_space *mapping = filp->f_mapping;
@@ -2454,19 +2607,38 @@ static int filemap_get_pages(struct kiocb *iocb, struct iov_iter *iter,
 	pgoff_t last_index;
 	struct page *page;
 	int err = 0;
+	unsigned long nr_misses = 0;
+	pgoff_t curr_pagevec_space = pagevec_space(pvec);
+	pgoff_t orig_last_index = DIV_ROUND_UP(iocb->ki_pos + iter->count, PAGE_SIZE);
 
-	last_index = DIV_ROUND_UP(iocb->ki_pos + iter->count, PAGE_SIZE);
+
+	if(iocb->ki_do_ra){
+         /*Assuming that RA is going to be in addition to the read*/
+         last_index = DIV_ROUND_UP(iocb->ki_pos + iter->count + iocb->ki_ra_count, PAGE_SIZE);
+	}
+	else{
+	   last_index = orig_last_index;
+	}
+
+     	//printk("%s: index=%ld, last_index=%ld\n", __func__, index, last_index);
+     	printk_once("sizeof(struct pagevec)=%ld \n", sizeof(struct pagevec));
+
 retry:
+
 	if (fatal_signal_pending(current))
 		return -EINTR;
 
-	filemap_get_read_batch(mapping, index, last_index, pvec);
-	if (!pagevec_count(pvec)) {
+     	page = NULL; 
+
+     	page = filemap_get_read_batch(mapping, index, last_index, pvec, false);
+	//page = filemap_get_read_batch(mapping, index, last_index, pvec, iocb->ki_do_ra);
+
+	if (!pagevec_count(pvec)) { //No pages found in PageCache
 		if (iocb->ki_flags & IOCB_NOIO)
 			return -EAGAIN;
-		page_cache_sync_readahead(mapping, ra, filp, index,
-				last_index - index);
-		filemap_get_read_batch(mapping, index, last_index, pvec);
+		page_cache_sync_readahead_req(mapping, ra, filp, index,
+				last_index - index, iocb->ra_req);
+		page = filemap_get_read_batch(mapping, index, last_index, pvec, false);
 	}
 	if (!pagevec_count(pvec)) {
 		if (iocb->ki_flags & (IOCB_NOWAIT | IOCB_WAITQ))
@@ -2478,9 +2650,11 @@ retry:
 		return err;
 	}
 
-	page = pvec->pages[pagevec_count(pvec) - 1];
+     if(!iocb->ki_do_ra || !page) //Default to normal path
+	   page = pvec->pages[pagevec_count(pvec) - 1];
+
 	if (PageReadahead(page)) {
-		err = filemap_readahead(iocb, filp, mapping, page, last_index);
+		err = filemap_readahead(iocb, filp, mapping, page, last_index, iocb->ra_req);
 		if (err)
 			goto err;
 	}
@@ -2511,6 +2685,7 @@ err:
  *
  * Copies data from the page cache.  If the data is not currently present,
  * uses the readahead and readpage address_space operations to fetch it.
+ * It is not called if O_DIRECT is set for this file
  *
  * Return: Total number of bytes copied, including those already read by
  * the caller.  If an error happens before any bytes are copied, returns
@@ -2525,16 +2700,28 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 	struct inode *inode = mapping->host;
 	struct pagevec pvec;
 	int i, error = 0;
+        bool read_stats = true; /*Controls recording read stats based on conditions*/
 	bool writably_mapped;
 	loff_t isize, end_offset;
 
+
 	if (unlikely(iocb->ki_pos >= inode->i_sb->s_maxbytes))
 		return 0;
-	if (unlikely(!iov_iter_count(iter)))
+	if (unlikely(!iov_iter_count(iter) && (!iocb->ki_do_ra || !iocb->ki_ra_count)))
 		return 0;
+
 
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
 	pagevec_init(&pvec);
+
+#ifdef CONFIG_ENABLE_CROSS_STATS
+	//pgoff_t nr_pages = DIV_ROUND_UP(iter->count, PAGE_SIZE);
+	isize = i_size_read(inode);
+	end_offset = min_t(loff_t, isize, iocb->ki_pos + iter->count);
+        loff_t end_pg = DIV_ROUND_UP(end_offset, PAGE_SIZE);
+        loff_t start_pg = iocb->ki_pos >> PAGE_SHIFT;
+        update_read_cache_stats(mapping->host, filp, start_pg, end_pg-start_pg);
+#endif
 
 	do {
 		cond_resched();
@@ -2547,8 +2734,15 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		if ((iocb->ki_flags & IOCB_WAITQ) && already_read)
 			iocb->ki_flags |= IOCB_NOWAIT;
 
-		error = filemap_get_pages(iocb, iter, &pvec);
-		if (error < 0)
+		error = filemap_get_pages(iocb, iter, &pvec, read_stats);
+
+          /*This means either PageReadahead or !PageUptoDate
+           * Both of which means further pages are not available
+           * So we can safely assume that further pages were fetched*/
+          if(pagevec_space(&pvec))
+            read_stats = false;
+
+		if (error < 0 || !iov_iter_count(iter))
 			break;
 
 		/*
@@ -2652,7 +2846,7 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	size_t count = iov_iter_count(iter);
 	ssize_t retval = 0;
 
-	if (!count)
+	if (!count && (!iocb->ki_do_ra || !iocb->ki_ra_count))
 		return 0; /* skip atime */
 
 	if (iocb->ki_flags & IOCB_DIRECT) {

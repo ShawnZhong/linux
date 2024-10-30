@@ -107,6 +107,8 @@
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
 
+#include <linux/crosslayer.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/initcall.h>
 
@@ -1417,6 +1419,13 @@ static int run_init_process(const char *init_filename)
 	pr_debug("  with environment:\n");
 	for (p = envp_init; *p; p++)
 		pr_debug("    %s\n", *p);
+
+#ifdef CONFIG_ENABLE_CROSS_STATS
+     init_global_pfetch_state();
+#endif
+        //sets up procfs for (un)bounded reads
+        setup_cross_interface();
+
 	return kernel_execve(init_filename, argv_init, envp_init);
 }
 

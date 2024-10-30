@@ -42,6 +42,8 @@
 #include <linux/mount.h>
 #include <linux/cred.h>
 
+#include <linux/crosslayer.h>
+
 #include <asm/byteorder.h>
 #include <uapi/linux/fs.h>
 
@@ -211,6 +213,11 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 #define WHITEOUT_DEV 0
 
 /*
+ * Magic number of inode rwsem disable flag
+ */
+#define INODE_RWSEM_OFF 0xFF
+
+/*
  * This is the Inode Attributes structure, used for notify_change().  It
  * uses the above definitions as flags, to know which values have changed.
  * Also, in this manner, a Filesystem can look at only the values it cares
@@ -336,6 +343,12 @@ struct kiocb {
 		unsigned int		ki_cookie; /* for ->iopoll */
 		struct wait_page_queue	*ki_waitq; /* for async buffered IO */
 	};
+
+	/*Read with Readahead info*/
+	bool            ki_do_ra;   // enable ra with read
+	loff_t          ki_ra_pos;  // file offset for ra
+	size_t          ki_ra_count; //bytes to be ra
+     struct read_ra_req *ra_req;    //user req struct
 
 	randomized_struct_fields_end
 };
@@ -652,6 +665,9 @@ struct inode {
 	u8			i_write_hint;
 	blkcnt_t		i_blocks;
 
+	
+        struct file_pfetch_state pfetch_state; /*crosslayer file prefetch counters*/
+
 #ifdef __NEED_I_SIZE_ORDERED
 	seqcount_t		i_size_seqcount;
 #endif
@@ -715,6 +731,22 @@ struct inode {
 
 #ifdef CONFIG_FS_VERITY
 	struct fsverity_info	*i_verity_info;
+#endif
+
+        /*
+         * Crosslayer Bitmap for files
+         * look at mm/cross_bitmap.c
+         */
+#ifdef CONFIG_CROSS_FILE_BITMAP
+        unsigned long *bitmap;
+	atomic_t i_bitmap_freed;
+        struct rw_semaphore bitmap_rw_sem;
+
+        unsigned long nr_bits_used; //how many relevant bits in the bitmap ?
+        unsigned long nr_longs_used; //how many relevant longs in the bitmap ?
+
+        unsigned long nr_bits_tot; //how many bits preallocated in the bitmap ?
+        unsigned long nr_longs_tot; //how many total longs preallocated in the bitmap ?
 #endif
 
 	void			*i_private; /* fs or device private pointer */
@@ -826,6 +858,8 @@ void unlock_two_nondirectories(struct inode *, struct inode*);
  * the read or for example on x86 they can be still implemented as a
  * cmpxchg8b without the need of the lock prefix). For SMP compiles
  * and 64bit archs it makes no difference if preempt is enabled or not.
+ *
+ * This function returns the size of the file
  */
 static inline loff_t i_size_read(const struct inode *inode)
 {
@@ -908,6 +942,7 @@ struct file_ra_state {
 	loff_t prev_pos;
 };
 
+
 /*
  * Check if @index falls in the readahead windows.
  */
@@ -925,7 +960,6 @@ struct file {
 	struct path		f_path;
 	struct inode		*f_inode;	/* cached value */
 	const struct file_operations	*f_op;
-
 	/*
 	 * Protects f_ep, f_flags.
 	 * Must not be taken from IRQ context.
@@ -955,6 +989,7 @@ struct file {
 	struct address_space	*f_mapping;
 	errseq_t		f_wb_err;
 	errseq_t		f_sb_err; /* for syncfs */
+
 } __randomize_layout
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 
@@ -3229,6 +3264,8 @@ extern ssize_t generic_write_checks(struct kiocb *, struct iov_iter *);
 extern int generic_write_check_limits(struct file *file, loff_t pos,
 		loff_t *count);
 extern int generic_file_rw_checks(struct file *file_in, struct file *file_out);
+
+unsigned long filemap_walk_pagecache(int fd);
 ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *to,
 		ssize_t already_read);
 extern ssize_t generic_file_read_iter(struct kiocb *, struct iov_iter *);

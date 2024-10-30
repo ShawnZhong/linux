@@ -1025,4 +1025,19 @@ static inline void hlist_move_list(struct hlist_head *old,
 	     pos && ({ n = pos->member.next; 1; });			\
 	     pos = hlist_entry_safe(n, typeof(*pos), member))
 
+#if 0
+/**nr_list_elem - returns the nr of elements in the list
+ * @list: the head of list
+ */ 
+unsigned long nr_list_elem(struct list_head *list){
+	struct list_head *node;
+	unsigned long n = 0UL;
+
+	list_for_each(node, list){
+		n += 1UL;
+     }
+
+     return n;
+}
+#endif
 #endif

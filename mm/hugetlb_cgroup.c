@@ -183,7 +183,7 @@ static void hugetlb_cgroup_move_parent(int idx, struct hugetlb_cgroup *h_cg,
 	}
 	counter = &h_cg->hugepage[idx];
 	/* Take the pages off the local counter */
-	page_counter_cancel(counter, nr_pages);
+	page_counter_cancel(counter, nr_pages, false);
 
 	set_hugetlb_cgroup(page, parent);
 out:
@@ -255,7 +255,7 @@ again:
 
 	if (!page_counter_try_charge(
 		    __hugetlb_cgroup_counter_from_cgroup(h_cg, idx, rsvd),
-		    nr_pages, &counter)) {
+		    nr_pages, &counter, false)) {
 		ret = -ENOMEM;
 		hugetlb_event(h_cg, idx, HUGETLB_MAX);
 		css_put(&h_cg->css);
@@ -327,7 +327,7 @@ static void __hugetlb_cgroup_uncharge_page(int idx, unsigned long nr_pages,
 
 	page_counter_uncharge(__hugetlb_cgroup_counter_from_cgroup(h_cg, idx,
 								   rsvd),
-			      nr_pages);
+			      nr_pages, false);
 
 	if (rsvd)
 		css_put(&h_cg->css);
@@ -359,7 +359,7 @@ static void __hugetlb_cgroup_uncharge_cgroup(int idx, unsigned long nr_pages,
 
 	page_counter_uncharge(__hugetlb_cgroup_counter_from_cgroup(h_cg, idx,
 								   rsvd),
-			      nr_pages);
+			      nr_pages, false);
 
 	if (rsvd)
 		css_put(&h_cg->css);
@@ -385,7 +385,7 @@ void hugetlb_cgroup_uncharge_counter(struct resv_map *resv, unsigned long start,
 		return;
 
 	page_counter_uncharge(resv->reservation_counter,
-			      (end - start) * resv->pages_per_hpage);
+			      (end - start) * resv->pages_per_hpage, false);
 	css_put(resv->css);
 }
 
@@ -400,7 +400,7 @@ void hugetlb_cgroup_uncharge_file_region(struct resv_map *resv,
 	if (rg->reservation_counter && resv->pages_per_hpage && nr_pages > 0 &&
 	    !resv->reservation_counter) {
 		page_counter_uncharge(rg->reservation_counter,
-				      nr_pages * resv->pages_per_hpage);
+				      nr_pages * resv->pages_per_hpage, false);
 		/*
 		 * Only do css_put(rg->css) when we delete the entire region
 		 * because one file_region must hold exactly one css reference.

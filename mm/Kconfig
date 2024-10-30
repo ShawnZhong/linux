@@ -889,4 +889,40 @@ config IO_MAPPING
 config SECRETMEM
 	def_bool ARCH_HAS_SET_DIRECT_MAP && !EMBEDDED
 
+
+# Crosslayer debug prints
+config ENABLE_CROSSLAYER_DEBUG
+    bool "debug crosslayer"
+
+
+# Crosslayer Stats and functionality
+config ENABLE_CROSS_STATS
+        def_bool y
+        bool "enable crosslayer OS stats, reduces performance"
+
+config CROSS_FILE_BITMAP
+	def_bool y
+        bool "bitmap for readahead_info"
+
+config CROSS_PREALLOC_SHIFT
+	int "SHIFT to use to preallocate bits for bitmap"
+	default 24
+	depends on CROSS_FILE_BITMAP
+
+# if this is enabled, force_page_cache_ra
+# will submit IO in 2MB chunks
+#config PREFETCH_2MB_LIMIT
+#    bool "2MB read limiting?"
+
+# if this is enabled, BLK_DEF_MAX_SECTORS= ~0UL
+# unlimited hardware sectors
+config UNLIMITED_MAX_SECTORS
+    bool "unlimited max_hw_sectors_kb for loop"
+
+#config CACHE_LIMITING
+#    bool "Accounts total cache being used for a subset of tasks"
+
+#config PREAD_RA_SIMPLE
+#       bool "Make pread_ra to be pread and readahead calls"
+
 endmenu

@@ -20,6 +20,7 @@
 #include <linux/compat.h>
 #include <linux/mount.h>
 #include <linux/fs.h>
+#include <linux/crosslayer.h>
 #include "internal.h"
 
 #include <linux/uaccess.h>
@@ -410,6 +411,7 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = (ppos ? *ppos : 0);
+     	kiocb.ki_do_ra = false;
 	iov_iter_init(&iter, READ, &iov, 1, len);
 
 	ret = call_read_iter(filp, &kiocb, &iter);
@@ -418,6 +420,39 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 		*ppos = kiocb.ki_pos;
 	return ret;
 }
+
+
+
+static ssize_t new_sync_read_ra(struct file *filp, char __user *buf, size_t len, loff_t *ppos,
+        struct read_ra_req *ra)
+{
+	struct iovec iov = { .iov_base = buf, .iov_len = len };
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	ssize_t ret;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = (ppos ? *ppos : 0);
+
+     	kiocb.ki_ra_pos = (ra->ra_pos ? ra->ra_pos : 0);
+     	kiocb.ki_ra_count = (ra->ra_count ? ra->ra_count : 0);
+     	kiocb.ki_do_ra = true;
+     	kiocb.ra_req = ra;
+
+     	/*
+     	printk("%s: ra_pos=%ld, ra_count=%ld\n", 
+             __func__, kiocb.ki_ra_pos, kiocb.ki_ra_count);
+     	*/
+
+	iov_iter_init(&iter, READ, &iov, 1, len);
+
+	ret = call_read_iter(filp, &kiocb, &iter);
+	BUG_ON(ret == -EIOCBQUEUED);
+	if (ppos)
+		*ppos = kiocb.ki_pos;
+	return ret;
+}
+
 
 static int warn_unsupported(struct file *file, const char *op)
 {
@@ -503,6 +538,61 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	inc_syscr(current);
 	return ret;
 }
+
+ssize_t vfs_read_ra(struct file *file, char __user *buf, size_t count, loff_t *pos, 
+        struct read_ra_req *ra)
+{
+	ssize_t ret;
+     	ssize_t ret_ra;
+     	bool do_ra = true;
+
+	if (!(file->f_mode & FMODE_READ))
+		return -EBADF;
+	if (!(file->f_mode & FMODE_CAN_READ))
+		return -EINVAL;
+	if (unlikely(!access_ok(buf, count)))
+		return -EFAULT;
+
+	if(*pos+count == ra->ra_pos || ra->ra_pos == 0){
+	   	ret = rw_verify_area(READ, file, pos, count+ra->ra_count);
+		goto chk_ret;
+	}
+	else{
+	   	ret = rw_verify_area(READ, file, pos, count);
+	   	ret_ra = rw_verify_area(READ, file, &ra->ra_pos, ra->ra_count);
+		if (ret_ra)
+		 do_ra = false;
+	}
+
+chk_ret:
+	if (ret)
+		return ret;
+
+	if (count > MAX_RW_COUNT)
+		count =  MAX_RW_COUNT;
+
+	if (file->f_op->read)
+		ret = file->f_op->read(file, buf, count, pos);
+
+	else if (file->f_op->read_iter)
+     	{	
+         	if(likely(do_ra))
+             		ret = new_sync_read_ra(file, buf, count, pos, ra);
+		else
+		   	ret = new_sync_read(file, buf, count, pos);
+     	}
+	else {
+		ret = -EINVAL;
+	}
+
+	if (ret > 0) {
+		fsnotify_access(file);
+		add_rchar(current, ret);
+	}
+	inc_syscr(current);
+	return ret;
+}
+
 
 static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
 {
@@ -644,6 +734,44 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	return ksys_read(fd, buf, count);
 }
 
+
+ssize_t ksys_read_ra(unsigned int fd, char __user *buf, size_t count, 
+        struct read_ra_req *ra)
+{
+	struct fd f = fdget_pos(fd);
+	ssize_t ret = -EBADF;
+
+	if (f.file) {
+		loff_t pos, *ppos = file_ppos(f.file);
+		if (ppos) {
+			pos = *ppos;
+			ppos = &pos;
+		}
+		ret = vfs_read_ra(f.file, buf, count, ppos, ra);
+		if (ret >= 0 && ppos)
+			f.file->f_pos = pos;
+		fdput_pos(f);
+	}
+	return ret;
+}
+
+SYSCALL_DEFINE4(read_ra, unsigned int, fd, char __user *, buf, size_t, count, 
+        struct read_ra_req __user *, ra)
+{
+    /*
+     * This syscall will do both read and ra together
+     * ra will start from the end of count bytes from current offset
+     * ra_count is the nr_bytes read ahead
+     */
+     if(!ra)
+        return ksys_read(fd, buf, count);
+
+     if(ra->ra_count <= 0)
+        return ksys_read(fd, buf, count);
+
+     return ksys_read_ra(fd, buf, count, ra);
+}
+
 ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 {
 	struct fd f = fdget_pos(fd);
@@ -694,6 +822,98 @@ SYSCALL_DEFINE4(pread64, unsigned int, fd, char __user *, buf,
 			size_t, count, loff_t, pos)
 {
 	return ksys_pread64(fd, buf, count, pos);
+}
+
+
+ssize_t ksys_pread64_ra(unsigned int fd, char __user *buf, size_t count,
+		     loff_t pos, struct read_ra_req *ra)
+{
+	struct fd f;
+	ssize_t ret = -EBADF;
+
+	if (pos < 0 || ra->ra_pos < 0)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (f.file) {
+		ret = -ESPIPE;
+		if (f.file->f_mode & FMODE_PREAD)
+			ret = vfs_read_ra(f.file, buf, count, &pos, ra);
+		fdput(f);
+	}
+
+	return ret;
+}
+
+SYSCALL_DEFINE5(pread_ra, unsigned int, fd, char __user *, buf,
+			size_t, count, loff_t, pos, struct read_ra_req __user *, ra_user)
+{
+        ssize_t ret = -EBADF;
+        struct read_ra_req ra;
+        if (unlikely(copy_from_user(&ra, ra_user, sizeof(struct read_ra_req)))){
+	        printk("%s: unable to copy from user, doing vanilla pread\n", __func__);
+	        goto normal_pread;
+        }
+
+#ifdef CONFIG_PREAD_RA_SIMPLE
+	ret = ksys_pread64(fd, buf, count, pos);
+        ksys_readahead(fd, pos+ra.ra_pos, ra.ra_count);
+        return ret;
+#else
+
+    if(unlikely(ra.ra_count <= 0)){
+	goto normal_pread;
+    }
+
+    /*
+     * This syscall will do both pread and ra together
+     * ra_pos is the start position of readahead and
+     * ra_count is the nr of bytes to readahead.
+     */
+
+    //reset ret values
+    ra.nr_present = 0UL;
+    ra.bio_req_nr = 0UL;
+    ra.total_cache_usage = 0L;
+
+#ifdef CONFIG_CACHE_LIMITING
+     /* Do not prefetch the whole file
+      * if cache limit has been breached
+      */
+    if(ra.full_file_ra && current->do_cache_acct && (ra.cache_limit > 0)){
+        unsigned long cache_usage = cache_usage_ret()*PAGE_SIZE;
+        if(ra.cache_limit <= cache_usage) 
+        {
+            ra.ra_pos = 0UL;
+            ra.ra_count = 0UL;
+            /*
+            printk("%s: DIsabling readahead %ld < %ld\n", __func__,
+                    ra.cache_limit, cache_usage_ret()*PAGE_SIZE);
+            */
+        }
+        else{
+            ra.ra_count = ra.cache_limit - cache_usage;
+        }
+
+    }
+#endif
+
+    ret = ksys_pread64_ra(fd, buf, count, pos, &ra);
+
+#ifdef CONFIG_CACHE_LIMITING
+    ra.total_cache_usage = cache_usage_ret() * PAGE_SIZE;
+#endif
+
+    if (unlikely(copy_to_user(ra_user, &ra, sizeof(struct read_ra_req)))){
+	printk("%s: couldnt copy struct read_ra_req back to user\n", __func__);
+    }
+
+    return ret;
+#endif
+
+normal_pread:
+    return ksys_pread64(fd, buf, count, pos);
+
 }
 
 ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,

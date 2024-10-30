@@ -113,8 +113,8 @@ int __fs_parse(struct p_log *log,
 	if (!p)
 		return -ENOPARAM;
 
-	if (p->flags & fs_param_deprecated)
-		warn_plog(log, "Deprecated parameter '%s'", param->key);
+	//if (p->flags & fs_param_deprecated)
+	//	warn_plog(log, "Deprecated parameter '%s'", param->key);
 
 	/* Try to turn the type we were given into the type desired by the
 	 * parameter and give an error if we can't.

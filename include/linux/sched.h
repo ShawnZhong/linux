@@ -36,6 +36,8 @@
 #include <linux/kcsan.h>
 #include <asm/kmap_size.h>
 
+#include <linux/crosslayer.h>
+
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
 struct backing_dev_info;
@@ -713,6 +715,7 @@ struct task_struct {
 	struct sched_rt_entity		rt;
 	struct sched_dl_entity		dl;
 
+
 #ifdef CONFIG_SCHED_CORE
 	struct rb_node			core_node;
 	unsigned long			core_cookie;
@@ -996,6 +999,10 @@ struct task_struct {
 
 	/* Open file information: */
 	struct files_struct		*files;
+
+        /* this handles per-thread stats*/
+        int                             cross_stats_enabled;
+        struct file_pfetch_state        pfetch_state; /*thread level prefetch stats*/
 
 #ifdef CONFIG_IO_URING
 	struct io_uring_task		*io_uring;
@@ -1386,6 +1393,9 @@ struct task_struct {
 	unsigned long			prev_lowest_stack;
 #endif
 
+    /* inode rw_sem control flag for NUSA */
+    int inode_rwsem_ctrl;
+
 #ifdef CONFIG_X86_MCE
 	void __user			*mce_vaddr;
 	__u64				mce_kflags;
@@ -1400,6 +1410,10 @@ struct task_struct {
 	struct llist_head               kretprobe_instances;
 #endif
 
+#ifdef CONFIG_CACHE_LIMITING
+     bool do_cache_acct; //if true, do cache accounting
+#endif
+
 	/*
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
@@ -1408,6 +1422,7 @@ struct task_struct {
 
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
+
 
 	/*
 	 * WARNING: on x86, 'thread_struct' contains a variable-sized

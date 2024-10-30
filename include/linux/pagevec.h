@@ -12,7 +12,10 @@
 #include <linux/xarray.h>
 
 /* 15 pointers + header align the pagevec structure to a power of two */
-#define PAGEVEC_SIZE	15
+//#define PAGEVEC_SIZE	15
+#define PAGEVEC_SIZE	63
+//#define PAGEVEC_SIZE	100
+#define TOT_SIZE 512
 
 struct page;
 struct address_space;
@@ -21,6 +24,8 @@ struct pagevec {
 	unsigned char nr;
 	bool percpu_pvec_drained;
 	struct page *pages[PAGEVEC_SIZE];
+     //char padding[TOT_SIZE - (sizeof(unsigned char) + sizeof(bool) + (PAGEVEC_SIZE *sizeof(struct page*)))]
+     //char padding[6];
 };
 
 void __pagevec_release(struct pagevec *pvec);

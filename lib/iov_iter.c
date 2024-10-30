@@ -817,6 +817,9 @@ static size_t __copy_page_to_iter(struct page *page, size_t offset, size_t bytes
 	return 0;
 }
 
+/*
+ * copy the data to userland
+ */
 size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i)
 {
