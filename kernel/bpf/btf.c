@@ -985,10 +985,19 @@ static const char *btf_show_name(struct btf_show *show)
 	/*
 	 * Don't show type name if we're showing an array member;
 	 * in that case we show the array type so don't need to repeat
-	 * ourselves for each member.
+	 * ourselves for each member.  However, we still need opening
+	 * braces/brackets for aggregate types so that they match
+	 * the closing ones printed by btf_show_end_aggr_type().
 	 */
-	if (show->state.array_member)
+	if (show->state.array_member) {
+		if (show->state.type) {
+			if (btf_type_is_struct(show->state.type))
+				return "{";
+			if (btf_type_is_array(show->state.type))
+				return "[";
+		}
 		return "";
+	}
 
 	/* Retrieve member name, if any. */
 	if (m) {
